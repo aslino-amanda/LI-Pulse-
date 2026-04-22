@@ -1,7 +1,15 @@
 import streamlit as st
 import pandas as pd
 import io
-from datetime import datetime
+from datetime import datetime, date
+from dateutil.relativedelta import relativedelta
+
+# Tenta importar o conector — se falhar, usa dados simulados
+try:
+    import metabase_connector as mb
+    MODO_REAL = True
+except Exception:
+    MODO_REAL = False
 
 st.set_page_config(
     page_title="LI Pulse · Automação de Onboarding",
@@ -457,10 +465,12 @@ with st.sidebar:
         "📉 Diagnóstico de queda",
     ], label_visibility="collapsed")
 
-    st.markdown("""
+    modo_label = "Dados reais" if MODO_REAL else "Dados simulados"
+    modo_cor   = "#D4F53C" if MODO_REAL else "#F59E0B"
+    st.markdown(f"""
     <div style='margin-top:2rem;padding-top:1rem;border-top:1px solid #1A6A64'>
-        <div style='font-size:11px;color:#5A9A96'>Demo · Dados simulados</div>
-        <div style='font-size:11px;color:#5A9A96'>Time de Automação · 2025</div>
+        <div style='font-size:11px;color:{modo_cor};font-weight:600'>● {modo_label}</div>
+        <div style='font-size:11px;color:#5A9A96;margin-top:2px'>Time de Automação · 2025</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -471,20 +481,67 @@ if pagina == "📊 O problema — funil":
     st.markdown("<h1 style='color:#1A2E2B;font-size:28px;font-weight:700;margin-bottom:4px'>O problema</h1>", unsafe_allow_html=True)
     st.markdown("<p style='color:#5A7A78;margin-bottom:1.5rem'>94% dos novos lojistas não chegam à primeira venda. Aqui está onde cada um trava.</p>", unsafe_allow_html=True)
 
+    # Seletor de período dinâmico
+    hoje = date.today()
     c1,c2,c3 = st.columns(3)
-    with c1: safra = st.selectbox("Safra", list(BASE.keys()))
+    with c1:
+        meses_opcoes = {
+            "Últimos 30 dias":  (hoje - relativedelta(days=30), hoje),
+            "Últimos 60 dias":  (hoje - relativedelta(days=60), hoje),
+            "Últimos 90 dias":  (hoje - relativedelta(days=90), hoje),
+            "Jan 2025":  (date(2025,1,1), date(2025,1,31)),
+            "Fev 2025":  (date(2025,2,1), date(2025,2,28)),
+            "Mar 2025":  (date(2025,3,1), date(2025,3,31)),
+        }
+        periodo_sel = st.selectbox("Período", list(meses_opcoes.keys()))
+        data_inicio, data_fim = meses_opcoes[periodo_sel]
+        data_inicio_str = data_inicio.strftime("%Y-%m-%d")
+        data_fim_str    = data_fim.strftime("%Y-%m-%d")
     with c2: origem_sel = st.selectbox("Origem", ["Todas","Orgânico","Pago","Indicação"])
     with c3: plano_sel  = st.selectbox("Plano", ["Todos","Grátis","Pago"])
 
-    d = BASE[safra]
-    mult = 1.0
-    if origem_sel != "Todas": mult *= d["origem"].get(origem_sel,0)/d["total"]
-    if plano_sel == "Grátis":  mult *= 0.62
-    if plano_sel == "Pago":    mult *= 0.38
-    def sc(v): return max(1,int(v*mult))
+    # Carrega dados reais ou simulados
+    if MODO_REAL:
+        try:
+            with st.spinner("Carregando dados do banco..."):
+                df_funil = mb.buscar_funil(data_inicio_str, data_fim_str)
 
-    total=sc(d["total"]); cfg=sc(d["cfg"]); visita=sc(d["visita"])
-    venda=sc(d["venda_apr"]); ns=sc(d["north_star"])
+            # Aplica filtros de origem e plano
+            if origem_sel != "Todas":
+                df_funil = df_funil[df_funil["flag_origem"] == origem_sel.upper()]
+            if plano_sel != "Todos":
+                df_funil = df_funil[df_funil["flag_plano"] == plano_sel.upper()]
+
+            # Agrega os totais do funil
+            def sg(col): return int(df_funil[col].sum()) if col in df_funil.columns else 0
+            total = sg("qtde_loja_criada")
+            cfg   = sg("qtde_loja_config")
+            visita= sg("qtde_loja_primeira_visita")
+            venda = sg("qtde_loja_primeira_venda_aprovada")
+            ns    = int(venda * 0.5)  # aproximação: 50% de quem vendeu chegou a 5 pedidos
+            def sc(v): return max(1, int(v))
+        except Exception as e:
+            st.warning(f"⚠️ Erro ao carregar dados reais: {e}. Usando dados simulados.")
+            MODO_REAL_LOCAL = False
+            d = BASE[list(BASE.keys())[0]]
+            def sc(v): return max(1,int(v))
+            total=sc(d["total"]); cfg=sc(d["cfg"]); visita=sc(d["visita"])
+            venda=sc(d["venda_apr"]); ns=sc(d["north_star"])
+    else:
+        # Fallback simulado — filtra pelo período mais próximo disponível
+        safra_map = {
+            "Últimos 30 dias": "Mar 2025", "Últimos 60 dias": "Fev 2025",
+            "Últimos 90 dias": "Jan 2025", "Jan 2025": "Jan 2025",
+            "Fev 2025": "Fev 2025", "Mar 2025": "Mar 2025",
+        }
+        d = BASE[safra_map.get(periodo_sel, "Mar 2025")]
+        mult = 1.0
+        if origem_sel != "Todas": mult *= d["origem"].get(origem_sel,0)/d["total"]
+        if plano_sel == "Grátis":  mult *= 0.62
+        if plano_sel == "Pago":    mult *= 0.38
+        def sc(v): return max(1,int(v*mult))
+        total=sc(d["total"]); cfg=sc(d["cfg"]); visita=sc(d["visita"])
+        venda=sc(d["venda_apr"]); ns=sc(d["north_star"])
 
     st.markdown(f"""
     <div class="ns-box">
@@ -712,22 +769,106 @@ elif pagina == "📉 Diagnóstico de queda":
     st.markdown("<h1 style='color:#1A2E2B;font-size:28px;font-weight:700;margin-bottom:4px'>Diagnóstico de queda em vendas</h1>", unsafe_allow_html=True)
     st.markdown("<p style='color:#5A7A78;margin-bottom:1.5rem'>Fecha o ciclo — identifica a causa raiz quando um lojista que já vendia começa a cair.</p>", unsafe_allow_html=True)
 
-    busca_q = st.text_input("Buscar loja", placeholder="Ex: LI-00421 ou Moda da Ana", key="bq")
-    termo_q = busca_q.strip().lower()
-    nomes = list(LOJAS_ATIVAS.keys())
-    filtrados = [k for k in nomes if termo_q in k.lower()] if termo_q else nomes
+    hoje_q = date.today()
+    col_sel1, col_sel2 = st.columns([3,1])
 
-    if not filtrados:
-        st.warning(f'Nenhuma loja encontrada para "{busca_q}".')
-        st.stop()
+    with col_sel1:
+        if MODO_REAL:
+            try:
+                with st.spinner("Carregando top lojas..."):
+                    df_top = mb.buscar_top_lojas(50)
+                opcoes_reais = {
+                    f"{row['nome_loja']} (ID: {row['conta_id']}) · GMV R${float(row['gmv_6m']):,.0f}": int(row['conta_id'])
+                    for _, row in df_top.iterrows()
+                }
+                opcao_manual = "[ Digitar ID manualmente ]"
+                lista_opcoes = [opcao_manual] + list(opcoes_reais.keys())
+                sel_loja = st.selectbox("Selecione uma loja ou digite o ID", lista_opcoes)
 
-    if len(filtrados)==1:
-        loja_sel = filtrados[0]
-        st.markdown(f"<p style='font-size:13px;color:#1ABCB0;margin-bottom:1rem'>1 loja encontrada: <strong>{loja_sel}</strong></p>", unsafe_allow_html=True)
+                if sel_loja == opcao_manual:
+                    conta_id_input = st.text_input("ID da conta (conta_id)", placeholder="Ex: 123456")
+                    conta_id = int(conta_id_input) if conta_id_input.strip().isdigit() else None
+                else:
+                    conta_id = opcoes_reais[sel_loja]
+                    st.markdown(f"<p style='font-size:12px;color:#1ABCB0'>conta_id: <strong>{conta_id}</strong></p>", unsafe_allow_html=True)
+
+            except Exception as e:
+                st.warning(f"Erro ao carregar lista: {e}")
+                conta_id_input = st.text_input("ID da conta (conta_id)", placeholder="Ex: 123456")
+                conta_id = int(conta_id_input) if conta_id_input.strip().isdigit() else None
+        else:
+            conta_id = None
+            nomes = list(LOJAS_ATIVAS.keys())
+            sel_loja = st.selectbox("Selecione uma loja (dados simulados)", nomes)
+
+    with col_sel2:
+        meses_queda = {
+            "Últimos 6 meses": (hoje_q - relativedelta(months=6), hoje_q),
+            "Últimos 3 meses": (hoje_q - relativedelta(months=3), hoje_q),
+            "2025 completo":   (date(2025,1,1), date(2025,12,31)),
+            "Out/24–Mar/25":   (date(2024,10,1), date(2025,3,31)),
+        }
+        periodo_queda = st.selectbox("Período", list(meses_queda.keys()), key="pq")
+        dq_inicio, dq_fim = meses_queda[periodo_queda]
+        dq_inicio_str = dq_inicio.strftime("%Y-%m-%d")
+        dq_fim_str    = dq_fim.strftime("%Y-%m-%d")
+        # Referência para churn: primeiro terço do período
+        ref_fim_dt    = dq_inicio + (dq_fim - dq_inicio) / 3
+        ref_inicio_str = dq_inicio_str
+        ref_fim_str    = ref_fim_dt.strftime("%Y-%m-%d")
+        corte_str      = (dq_inicio + (dq_fim - dq_inicio) * 2 / 3).strftime("%Y-%m-%d")
+
+    # Carrega dados da loja selecionada
+    if MODO_REAL and conta_id:
+        try:
+            with st.spinner("Carregando diagnóstico..."):
+                df_tend  = mb.buscar_tendencia(conta_id, dq_inicio_str, dq_fim_str)
+                df_nr    = mb.buscar_novos_recorrentes(conta_id, dq_inicio_str, dq_fim_str)
+                df_pag   = mb.buscar_mix_pagamento(conta_id, dq_inicio_str, dq_fim_str)
+                df_churn = mb.buscar_clientes_churned(conta_id, ref_inicio_str, ref_fim_str, corte_str)
+
+            # Monta estrutura compatível com o restante da tela
+            meses_r      = df_tend["mes"].tolist()
+            pedidos_r    = [int(v) for v in df_tend["total_pedidos"].tolist()]
+            ticket_r     = [float(v) for v in df_tend["ticket_medio"].tolist()]
+            gmv_r        = [float(v) for v in df_tend["receita_total"].tolist()]
+            novos_r      = df_nr[df_nr["tipo_cliente"]=="Novo"]["total_pedidos"].tolist() if not df_nr.empty else [0]*len(meses_r)
+            rec_r        = df_nr[df_nr["tipo_cliente"]=="Recorrente"]["total_pedidos"].tolist() if not df_nr.empty else [0]*len(meses_r)
+            pix_r        = df_pag[df_pag["forma_pagamento"].str.contains("Pix|pix",na=False)]["total_pedidos"].tolist() if not df_pag.empty else [0]*len(meses_r)
+            cartao_r     = df_pag[df_pag["forma_pagamento"].str.contains("Cartão|cartao|Crédito|credito",na=False)]["total_pedidos"].tolist() if not df_pag.empty else [0]*len(meses_r)
+            externo_r    = df_pag[df_pag["forma_pagamento"].str.contains("Externo|externo|Manual|manual",na=False)]["total_pedidos"].tolist() if not df_pag.empty else [0]*len(meses_r)
+
+            top_clientes_r = [
+                dict(nome=row["cliente_nome"], emails=row["cliente_email"],
+                     receita=float(row["receita_total_historico"]), pedidos=int(row["total_pedidos_historico"]))
+                for _, row in df_churn.head(3).iterrows()
+            ] if not df_churn.empty else []
+
+            # Detecta causa automaticamente
+            if len(gmv_r) >= 2:
+                queda_g = (gmv_r[-1]-gmv_r[0])/gmv_r[0]*100 if gmv_r[0] else 0
+                queda_t = (ticket_r[-1]-ticket_r[0])/ticket_r[0]*100 if ticket_r[0] else 0
+                n_b2b_auto = sum(1 for c in detectar_b2b(top_clientes_r) if c["perfil_b2b"])
+                if n_b2b_auto >= 1 and queda_g < -20: causa_auto = "churn_b2b"
+                elif queda_t < -15 and abs(queda_g) < 20: causa_auto = "mix_pagamento"
+                else: causa_auto = "colapso_canal"
+            else:
+                causa_auto = "colapso_canal"
+
+            d = dict(
+                causa=causa_auto, perfil=f"ID {conta_id}",
+                meses=meses_r, pedidos=pedidos_r, ticket=ticket_r, gmv=gmv_r,
+                pix=pix_r, cartao=cartao_r, externo=externo_r,
+                novos=novos_r, recorrentes=rec_r, cupom_pct=[0]*len(meses_r),
+                top_clientes=top_clientes_r,
+            )
+        except Exception as e:
+            st.error(f"Erro ao carregar dados da loja: {e}")
+            st.stop()
     else:
-        loja_sel = st.selectbox("Selecione", filtrados, label_visibility="collapsed")
+        # Fallback simulado
+        d = LOJAS_ATIVAS[sel_loja if not MODO_REAL else list(LOJAS_ATIVAS.keys())[0]]
 
-    d = LOJAS_ATIVAS[loja_sel]
     diag = DIAGNOSTICOS_QUEDA[d["causa"]]
     score_churn, nivel_churn, cor_churn, razoes_churn, clientes_b2b = calcular_score_churn(d)
     n_b2b = sum(1 for c in clientes_b2b if c["perfil_b2b"])
