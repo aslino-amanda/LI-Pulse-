@@ -867,7 +867,8 @@ elif pagina == "📉 Diagnóstico de queda":
             st.stop()
     else:
         # Fallback simulado
-        d = LOJAS_ATIVAS[sel_loja if not MODO_REAL else list(LOJAS_ATIVAS.keys())[0]]
+        sel_loja_fallback = list(LOJAS_ATIVAS.keys())[0]
+        d = LOJAS_ATIVAS[sel_loja_fallback]
 
     diag = DIAGNOSTICOS_QUEDA[d["causa"]]
     score_churn, nivel_churn, cor_churn, razoes_churn, clientes_b2b = calcular_score_churn(d)
